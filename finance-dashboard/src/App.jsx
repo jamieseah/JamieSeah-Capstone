@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback, useContext } from 'react'
-import { StockContext } from './StockContext.jsx'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useStocks } from './StockContext.jsx'
 
 const API_KEY = import.meta.env.VITE_ALPHAVANTAGE_KEY
 
@@ -7,17 +7,23 @@ function fmt(n, digits = 2) {
   if (n == null || Number.isNaN(n)) return '—'
   return Number(n).toLocaleString(undefined, {
     minimumFractionDigits: digits,
-    maximumFractionDigits: digits
+    maximumFractionDigits: digits,
   })
 }
 
 export default function App() {
-  const {stocks, setStocks } = useContext(StockContext)
+  const { stocks, setStocks } = useStocks()
   const [symbol, setSymbol] = useState('')
   const [quantity, setQuantity] = useState('')
   const [price, setPrice] = useState('')
   const [error, setError] = useState('')
   const [apiStatus, setApiStatus] = useState('')
+
+  // Debugging: Only track the set of symbols, not full stocks array
+  const symbolsKey = useMemo(
+    () => [...new Set(stocks.map(s => s.symbol))].sort().join(','),
+    [stocks]
+  )
 
   function addStock(e) {
     e.preventDefault()
@@ -25,40 +31,48 @@ export default function App() {
     const s = symbol.trim().toUpperCase()
     const q = Number(quantity)
     const p = Number(price)
+
     if (!s) return setError('Please enter a stock symbol.')
     if (!Number.isFinite(q) || q <= 0) return setError('Quantity must be a positive number.')
     if (!Number.isFinite(p) || p <= 0) return setError('Purchase price must be a positive number.')
 
     setStocks(prev => [
       ...prev,
-      { id: crypto.randomUUID(), symbol: s, quantity: q, purchasePrice: p, currentPrice: null }
+      { id: crypto.randomUUID(), symbol: s, quantity: q, purchasePrice: p, currentPrice: null },
     ])
-    setSymbol(''); setQuantity(''); setPrice('')
+    setSymbol('')
+    setQuantity('')
+    setPrice('')
   }
 
   function removeStock(id) {
     setStocks(prev => prev.filter(s => s.id !== id))
   }
 
+  // Debugging: fetchPrices now depends only on symbolsKey
   const fetchPrices = useCallback(async () => {
-    if (!API_KEY || stocks.length === 0) return
+    if (!API_KEY || !symbolsKey) return
     setApiStatus('')
-
-    const uniqueSymbols = [...new Set(stocks.map(s => s.symbol))]
+    const uniqueSymbols = symbolsKey.split(',').filter(Boolean)
     const priceMap = {}
 
     for (const sym of uniqueSymbols) {
       try {
-        const url = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(sym)}&apikey=${API_KEY}`
+        const url = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(
+          sym
+        )}&apikey=${API_KEY}`
         const res = await fetch(url)
         const data = await res.json()
 
-        if (data?.Note) { setApiStatus('Rate-limited by AlphaVantage (free tier). Try again shortly.'); continue }
+        if (data?.Note) { setApiStatus('Rate-limited by AlphaVantage. Try again later.'); continue }
         if (data?.Information) { setApiStatus(data.Information); continue }
         if (data?.['Error Message']) { setApiStatus(`Invalid symbol: ${sym}`); continue }
 
         const priceStr = data?.['Global Quote']?.['05. price'] ?? data?.['Global Quote']?.['05. Price']
         priceMap[sym] = priceStr ? Number(priceStr) : null
+
+        // Debugging: Insert stagger to avoid hitting free-tier limits too quickly
+        await new Promise(r => setTimeout(r, 60))
       } catch {
         setApiStatus('Network error fetching prices.')
       }
@@ -67,18 +81,25 @@ export default function App() {
     setStocks(prev =>
       prev.map(row => ({
         ...row,
-        currentPrice: priceMap[row.symbol] ?? row.currentPrice ?? null
+        currentPrice: priceMap[row.symbol] ?? row.currentPrice ?? null,
       }))
     )
-  }, [stocks.length, setStocks]) 
+  }, [symbolsKey, setStocks])
 
+  // Debugging: Adding StrictMode-friendly effect with cancellation
   useEffect(() => {
-    fetchPrices()
+    let cancelled = false
+    ;(async () => {
+      if (!cancelled) await fetchPrices()
+    })()
+    return () => { cancelled = true }
   }, [fetchPrices])
 
   return (
     <div className="container">
       <h1>Finance Dashboard</h1>
+      <p className="sub">Add your stock purchases and track profit/loss with live prices.</p>
+
       <form className="card form" onSubmit={addStock}>
         <h2>Add a stock</h2>
 
@@ -123,7 +144,8 @@ export default function App() {
       </form>
 
       <div className="card">
-        <h2>Your Holdings</h2>
+        <h2>Your holdings</h2>
+
         {stocks.length === 0 ? (
           <div className="empty">No stocks yet. Add your first one above.</div>
         ) : (
@@ -148,9 +170,10 @@ export default function App() {
                 {stocks.map(s => {
                   const value = s.currentPrice != null ? s.currentPrice * s.quantity : null
                   const pl = s.currentPrice != null ? (s.currentPrice - s.purchasePrice) * s.quantity : null
-                  const plPct = s.currentPrice != null && s.purchasePrice > 0
-                    ? ((s.currentPrice - s.purchasePrice) / s.purchasePrice) * 100
-                    : null
+                  const plPct =
+                    s.currentPrice != null && s.purchasePrice > 0
+                      ? ((s.currentPrice - s.purchasePrice) / s.purchasePrice) * 100
+                      : null
                   const plClass = pl == null ? '' : pl > 0 ? 'pl-up' : pl < 0 ? 'pl-down' : ''
 
                   return (
